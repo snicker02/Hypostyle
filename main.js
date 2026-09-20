@@ -8,13 +8,14 @@ import { UnitCell } from './engine/unit.js';
 import { expandUnit, buildSkeleton } from './engine/expander.js';
 import { findVoids, describeVoids } from './engine/voids.js';
 import { buildExport, download } from './engine/export.js';
+import { fillInteriors, describeInteriors } from './engine/wfc/index.js';
 import { PRESETS, buildPreset } from './engine/presets.js';
 import { Renderer, boxLines, gridLines, linesToMesh } from './engine/renderer.js';
 import {
   VoxelGrid, Palette, MATERIALS, meshGrid, raycastGrid, raycastPlane, rayFromNDC,
 } from './engine/blockcore/index.js';
 
-export const HYPOSTYLE_VERSION = '0.1.1';
+export const HYPOSTYLE_VERSION = '0.2.1';
 
 const $ = (id) => document.getElementById(id);
 const palette = new Palette();
@@ -31,6 +32,8 @@ const state = {
   cellGrid: null,
   pickGrid: null,
   structure: null,
+  interior: null,
+  interiorMesh: null,
   voids: null,
   hover: null,
   dirty: true,
@@ -294,6 +297,7 @@ function buildStructure() {
 
   state.structure = { ...result, repeats };
   state.voids = null;
+  clearInteriors(false);
   renderer.setBatch('structure', meshGrid(result.grid, { palette }), { order: 0 });
   setStats($('buildStats'), [
     ['cells', repeats.join(' x ')],
@@ -327,12 +331,16 @@ function setView(view) {
   const author = view === 'author';
   renderer.clearBatch(author ? 'structure' : 'solid');
   if (author) {
+    renderer.clearBatch('interior');
     refreshAuthor();
   } else {
     renderer.clearBatch('ghost');
     renderer.clearBatch('domain');
     if (!state.structure) buildStructure();
     else overlayLines();
+    if (state.interior && state.interiorMesh) {
+      renderer.setBatch('interior', state.interiorMesh, { order: 1 });
+    }
   }
   $('help').style.opacity = author ? '1' : '0.35';
   state.dirty = true;
@@ -613,6 +621,15 @@ function wireControls() {
     if (button) setView(button.dataset.view);
   });
 
+  $('wfcFill').addEventListener('click', doFillInteriors);
+  $('wfcClear').addEventListener('click', () => { clearInteriors(true); say('interiors cleared'); });
+  $('wfcReseed').addEventListener('click', () => {
+    $('wfcSeed').value = String(1 + Math.floor(Math.random() * 999999));
+    doFillInteriors();
+  });
+  $('wfcDensity').addEventListener('input', () => {
+    $('wfcDensityNote').textContent = $('wfcDensity').value;
+  });
   $('exportPack').addEventListener('click', () => doExport('pack'));
   $('exportStructure').addEventListener('click', () => doExport('single'));
   $('exportCommands').addEventListener('click', () => doExport('commands'));
@@ -640,6 +657,92 @@ function applyGroup(group) {
   say(check.ok ? '' : `cell snapped to ${check.fixed.join(' x ')} for ${group.hm}`);
 }
 
+/* ------------------------------------------------- interiors (phase two) */
+
+function exportGrid() {
+  return state.interior ? state.interior.grid : state.structure.grid;
+}
+
+function clearInteriors(redraw) {
+  state.interior = null;
+  state.interiorMesh = null;
+  renderer.clearBatch('interior');
+  setStats($('wfcStats'), []);
+  $('wfcNote').className = 'note';
+  $('wfcNote').textContent = state.structure
+    ? 'Fill the rooms the skeleton encloses.'
+    : 'Build a structure, then fill the rooms inside it.';
+  if (redraw) {
+    if (state.structure) {
+      renderer.setBatch('structure', meshGrid(state.structure.grid, { palette }), { order: 0 });
+    }
+    state.dirty = true;
+  }
+}
+
+function doFillInteriors() {
+  if (!state.structure) { say('build a structure first'); return; }
+  const density = Math.max(0, Math.min(1, Number($('wfcDensity').value) / 100));
+  const seed = Math.max(1, Number($('wfcSeed').value) | 0);
+  $('wfcNote').className = 'note';
+  $('wfcNote').textContent = 'collapsing...';
+
+  const t0 = performance.now();
+  let result;
+  try {
+    result = fillInteriors(state.structure.grid, { seed, density });
+  } catch (err) {
+    state.interior = null;
+    $('wfcNote').className = 'note warn';
+    $('wfcNote').textContent = `interiors failed: ${err.message}`;
+    return;
+  }
+  const ms = performance.now() - t0;
+
+  if (!result.ok) {
+    state.interior = null;
+    $('wfcNote').className = 'note warn';
+    $('wfcNote').textContent = result.message;
+    state.dirty = true;
+    return;
+  }
+
+  state.interior = result;
+  // Two batches so the fill reads as a separate layer from the shell.
+  renderer.setBatch('structure', meshGrid(state.structure.grid, { palette }), { order: 0 });
+  state.interiorMesh = meshGrid(onlyFill(result, state.structure.grid), { palette });
+  renderer.setBatch('interior', state.interiorMesh, { order: 1 });
+
+  const top = [...result.byFamily].sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([n, c]) => `${n.split('.')[1] || n} ${c}`).join(', ');
+  setStats($('wfcStats'), [
+    ['rooms', `${result.solvedRegions} of ${result.solvedRegions + result.failedRegions}`],
+    ['blocks placed', result.placed.toLocaleString()],
+    ['module cells', result.coarse.join(' x ')],
+    ['grid offset', result.offset.join(', ')],
+    ['variants', `${result.variants} from ${result.families} modules`],
+    ['commonest', top || 'nothing'],
+    ['fill time', `${ms.toFixed(0)} ms`],
+  ]);
+  const c = result.connectivity;
+  const bad = result.failedRegions > 0 || (c && c.cutOff > 0);
+  $('wfcNote').className = bad ? 'note warn' : 'note good';
+  $('wfcNote').textContent = describeInteriors(result);
+  $('exportNote').textContent = `Ready: ${exportGrid().size.toLocaleString()} blocks.`;
+  setView('structure');
+  state.dirty = true;
+  say(`interiors: ${result.placed.toLocaleString()} blocks in ${ms.toFixed(0)} ms`);
+}
+
+/** The fill on its own, for drawing it as its own layer. */
+function onlyFill(result, skeleton) {
+  const out = new VoxelGrid({ budget: result.grid.budget });
+  result.grid.forEach((x, y, z, value) => {
+    if (!skeleton.has(x, y, z)) out.set(x, y, z, value & 0xff, (value >> 8) & 0xff);
+  });
+  return out;
+}
+
 function doExport(kind) {
   if (!state.structure) buildStructure();
   if (!state.structure) return;
@@ -652,7 +755,15 @@ function doExport(kind) {
     `${unit.blocks.size} authored blocks became ${state.structure.tile.cells.toLocaleString()}.`,
   ];
   const t0 = performance.now();
-  const result = buildExport(state.structure.grid, { name, chunk: [edge, edge, edge], notes });
+  const air = $('airMode').value;
+  if (state.interior) {
+    notes.push(`Interiors filled by wave function collapse: `
+      + `${state.interior.placed.toLocaleString()} blocks, seed ${state.interior.seed}, `
+      + `density ${state.interior.density.toFixed(2)}.`);
+  }
+  const result = buildExport(exportGrid(), {
+    name, chunk: [edge, edge, edge], notes, air,
+  });
   const ms = performance.now() - t0;
 
   if (kind === 'single') {

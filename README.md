@@ -1,13 +1,12 @@
-# Hypostyle v0.1.1
+# Hypostyle v0.2.1
 
 Procedural Minecraft Bedrock architecture from a crystallographic symmetry
 skeleton. You author one asymmetric unit; a space group expands it into
 columns, ribs, walls, floors and shell; the result tiles and exports as a
 `.mcpack` of `.mcstructure` pieces.
 
-This is **phase one only**: skeleton, editor, expander, export. No wave
-function collapse code exists yet, by design — the skeleton has to produce
-architecture you actually want before interiors are worth building.
+Both layers are now built: the symmetry skeleton, and wave function collapse
+interiors inside the rooms it encloses.
 
 ```
 index.html          page shell and styling
@@ -20,12 +19,18 @@ engine/
   voids.js          connected air regions, sealed or open
   export.js         axis map, split, placement guide, pack assembly
   presets.js        five worked units
+  wfc/
+    modules.js      3x3x3 modules, lattice variants, face profiles
+    library.js      the authored module set
+    adjacency.js    adjacency and the skeleton boundary rule
+    collapse.js     the solver
+    interiors.js    regions, bands, write-back, connectivity
   renderer.js       WebGL1 renderer (one program, batched, fogged)
   mat4.js           4x4 matrix helpers
   blockcore/        shared block engine (see "blockcore" below)
 tools/
   gen-spacegroups.py  regenerates engine/spacegroups.js from spglib
-  validate.mjs        headless validation, 209 checks
+  validate.mjs        headless validation, 292 checks
 ```
 
 Run `node tools/validate.mjs` from the repo root. No build step, no
@@ -131,6 +136,16 @@ Three buttons, one build:
   split into aligned pieces, plus `commands.txt` (the literal
   `/structure load` lines in order), `placement-guide.txt` (the same offsets as
   a table, for structure blocks) and `README.txt`.
+* **Open space** — what to do with empty cells. `leave terrain` (the default)
+  writes -1, meaning "don't change this block", so the build drops into terrain
+  and the terrain shows through every window and fills every room.
+  `clear under the build` writes explicit air in every empty cell that has part
+  of the build above it in the same column, so interiors, aisles and undercrofts
+  arrive hollow while the sky above the roof and the ground beside the walls are
+  left alone — this is almost always the one you want. `clear the whole box`
+  levels the entire bounding box. The roofed test is computed once over the
+  whole build and queried per piece; worked out per piece, the topmost piece
+  would have no roof above it and would come out solid.
 * **Single .mcstructure** — the whole build in one file, always written, at any
   size. Over 64 blocks on an axis the structure block UI will not show it,
   because that UI clamps its size fields to 64; the file format itself has no
@@ -163,26 +178,116 @@ Collision counts in the expander are cosmetic — two orbit images landing on th
 same block with different materials. First write wins, deterministically.
 Staggered hall and cubic crypt have them by construction; the others are clean.
 
-## Phase two — wave function collapse (not built)
+## Phase two — interiors
 
-Planned, from the brief, so the phase one shape doesn't foreclose it:
+The skeleton is exactly periodic. The interiors are not, deliberately: the
+contrast between a shell that repeats and a fill that never does is the whole
+reason for combining the two.
 
-* 3×3×3 modules. Adjacency derived from block content — two modules fit across
-  a face when their 3×3 boundary slices match — never hand-typed sockets.
-  Authoring a module means placing blocks; the adjacency table falls out,
-  including all lattice rotations.
-* The skeleton enters as pre-collapsed cells, so interiors meet doorways and
-  window openings correctly.
-* Modules tagged floor / interior / ceiling, constrained to the matching
-  vertical band.
-* Contradictions restart the failing region only, with capped retries and a
-  reported failure — never a whole-build restart, never a hang.
-* After collapse, flood-fill from the skeleton's entrances and report orphans.
+**Modules are 3x3x3 blocks and nothing else.** There are no sockets and no
+hand-typed tags. Two modules fit across a face when the 3x3 layers they present
+to each other agree — read straight off the blocks. The comparison is on
+solidity rather than material, which is what lets a mossy bench and a clean one
+be the same bench without doubling the module set. Nine positions, nine bits,
+one integer per face, so a compatibility test is a single `===`.
 
-Symmetry stays on the skeleton. Interiors are deliberately asymmetric; that
-contrast is the point of the combination.
+Every module is expanded by the lattice rotations that keep up pointing up: four
+quarter turns about the vertical, with and without a mirror, deduplicated. The
+full 24 rotations of the cube are not used — they would tip a floor onto a wall,
+and in a building the vertical is not interchangeable with the horizontal.
 
-## Keys
+**The coarse grid is offset, and that matters more than it sounds.** Laying the
+3x3x3 grid from the build's minimum corner puts the skeleton's one-block floor
+inside the bottom layer of cells, which makes that layer non-empty, which
+excludes it — so the first usable layer starts three blocks up and everything
+lands hanging in the air. All 27 alignments are tried and the best is kept.
+
+"Best" took two goes to get right. Scoring by empty cells alone picked an
+alignment for the arcade that floated two blocks clear of the floor: the layer
+was empty, which is what was being counted, but nothing in it had anything
+underneath, so the boundary rule forbade every module that stands on the ground
+and the entire floor band came out void — 115 blocks placed in a room of 492
+cells. The score now counts *supported* empty cells first, cells with solid
+directly beneath them, and uses the plain empty count only to break ties. Same
+build, same seed, 949 blocks.
+
+**The skeleton enters pre-collapsed.** A coarse cell takes part only if all 27
+of its blocks are air. Everything else — wall, column, a cell clipped by the box
+— is a boundary condition read off its actual block content. The rule there is
+not equality but one prohibition, the same in all six directions:
+
+> a module may not put a block against air on the far side of a boundary.
+
+Sideways that keeps doorways, arches and windows clear. Downwards it means
+nothing is placed without support. Upwards it means a lamp needs a roof to hang
+from. This is a judgement rather than a derivation and is worth saying plainly:
+exact equality against arbitrary skeleton content would reject almost every
+module, and the useful thing to forbid is blocking a passage or floating in
+mid-air, not failing to mirror a wall.
+
+**Regions and bands.** Participating cells are split into 6-connected components
+and each is solved alone, so one failure does not spoil the rest. Within a
+region the lowest coarse layer is the floor band, the highest the ceiling band,
+the rest interior. Bands are per region and not per column, so every cell in a
+layer offers the same faces sideways — a ragged room never asks a floor to meet
+a ceiling edge on.
+
+**Contradictions and sealed rooms** are both answered the same way: restart that
+region with a fresh seed, capped at eight attempts, after which the least bad
+answer is kept and reported. It never restarts the whole build and it never
+hangs.
+
+Connectivity has to be inside that loop rather than a report afterwards. A
+partition runs floor to ceiling by construction, so a perfectly legal wave can
+still cut a room in half and leave one side with no way out — it did, in 6 of 90
+stress runs, before the check moved inside. What is measured is fragmentation of
+the region's own air: before the fill it is one connected piece by construction,
+so afterwards anything outside the largest remaining piece has been walled away.
+Total air is deliberately not the measure; an earlier version scored that way
+and, since filling the room with blocks lowers the air, it rewarded building
+*more* wall. It made the problem worse and looked like a solver bug.
+
+**The library is fittings, not architecture.** The skeleton already has floors,
+walls and a roof. Two earlier drafts are worth recording because both failed
+visibly in a cross section: a floor band that laid its own slab built a second
+floor hanging above the real one; an interior band of single ornaments left
+quartz blocks floating with nothing under them. The rule now is that a module
+either stands on the ground, hangs from the roof, or spans between — so the
+floor band holds the furniture, the ceiling band the lighting, and the interior
+band almost nothing but columns passing through. A tall hall *should* be mostly
+air at head height.
+
+Three mechanisms give the solver real work rather than weighted dice:
+
+* **Centre pieces** touch no side face, so they join anything an empty cell
+  joins. Ornament is free.
+* **Runs with end caps.** A bench spanning x = 0..2 leaves a bit on its -x and
+  +x faces, so it can only continue into another bench; the end cap carries the
+  bit on one side and nothing on the other. That pairing is what forces the
+  solver to decide where runs stop.
+* **Vertical families.** A pillar chains through as many cells as the room is
+  tall and must finish in a cap or reach the roof. It cannot start without
+  somewhere to end.
+
+Density scales emptiness against everything else, so the same library furnishes
+a room lightly or heavily without re-authoring it. Seed and density are both in
+the UI; the same seed always gives the same fill.
+
+**Partitions** are the first family that has to terminate in two directions at
+once. Sideways a wall leaves the full column of its side face, so it can only
+continue into another wall or an end cap. Vertically it leaves the full row of
+its top and bottom faces, so it can only continue into another wall — which
+means a partition always runs the whole height of the room, floor to roof. That
+is what a partition is. The end cap carries the side profile on one side and
+nothing on the other, and its own top and bottom rows are two thirds long, so
+the end of a wall stays the end of that wall all the way up. Doorways and
+hearths are floor-band variants of the same wall, with the opening cut out.
+
+Weights on the vertical families are deliberately low. One choice of pillar in a
+room eleven cells tall commits eleven cells, so a weight that looks modest
+against an empty cell still turns the room into a thicket.
+
+## Keys## Keys
 
 `f` frame · `[` `]` move the work plane · `g` toggle the grid ·
 drag orbits · middle-drag or shift-drag pans · wheel zooms · `Esc` cancels a

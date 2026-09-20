@@ -11,6 +11,9 @@
 //   7  tiling is exact and budget-honest
 //   8  blockcore: storage, mesher, NBT, .mcstructure, split, zip
 //   9  the axis map into Minecraft is a rotation, not a reflection
+//  12  wfc modules, variants and adjacency
+//  13  the wave solves every preset and seals nothing
+//  14  open space written as air, and split pieces written from their corner
 //  10  room finding
 //  11  the five presets build and stay invariant
 
@@ -21,7 +24,12 @@ import {
 import { UnitCell } from '../engine/unit.js';
 import { expandUnit, tileCells, buildSkeleton } from '../engine/expander.js';
 import { findVoids } from '../engine/voids.js';
-import { toMinecraftAxes, buildExport } from '../engine/export.js';
+import { toMinecraftAxes, buildExport, roofedTest } from '../engine/export.js';
+import {
+  moduleSet, fillInteriors, solve, mulberry32, parseLayers, rotateZ, mirrorX,
+  contentKey, faceProfile, opposite, forbiddenMask, boundaryAllows,
+  idx as wfcIdx,
+} from '../engine/wfc/index.js';
 import { PRESETS, buildPreset } from '../engine/presets.js';
 import {
   VoxelGrid, BudgetExceeded, packKey, unpackKey, Palette, meshGrid, countExposedFaces,
@@ -593,6 +601,364 @@ gate('11  presets');
     reloaded.blocks.size === buildPreset('cloister-cells').unit.blocks.size
     && reloaded.dims.join() === unitJson.dims.join()
     && reloaded.group.number === unitJson.group);
+}
+
+/* ------------------------------------------------ 12. modules and adjacency */
+
+gate('12  wfc modules');
+{
+  const set = moduleSet();
+  check('the library expands into variants', set.variants.length >= set.families,
+    `${set.families} modules -> ${set.variants.length} variants`);
+  check('every variant carries 27 cells',
+    set.variants.every((v) => v.cells.length === 27));
+
+  // Four turns about z is the identity; the mirror is an involution.
+  const base = parseLayers([['SC.', '...', '...'], ['...', '.P.', '...'], ['..G', '...', '...']]);
+  let spun = base;
+  for (let i = 0; i < 4; i++) spun = rotateZ(spun);
+  check('four quarter turns come back to the start', contentKey(spun) === contentKey(base));
+  check('the mirror is its own inverse',
+    contentKey(mirrorX(mirrorX(base))) === contentKey(base));
+  check('a turn is a bijection on the 27 cells',
+    (() => {
+      const seen = new Set();
+      const r = rotateZ(base);
+      let n = 0;
+      for (let i = 0; i < 27; i++) if (r[i] !== -1) n++;
+      for (let i = 0; i < 27; i++) if (base[i] !== -1) seen.add(i);
+      return n === seen.size;
+    })());
+  check('turning about z never changes a height',
+    (() => {
+      const r = rotateZ(base);
+      for (let z = 0; z < 3; z++) {
+        let a = 0, b = 0;
+        for (let x = 0; x < 3; x++) for (let y = 0; y < 3; y++) {
+          if (base[wfcIdx(x, y, z)] !== -1) a++;
+          if (r[wfcIdx(x, y, z)] !== -1) b++;
+        }
+        if (a !== b) return false;
+      }
+      return true;
+    })());
+
+  // Faces must line up physically: a face and the face it meets index the same
+  // positions, so a module butted against a copy of itself always agrees.
+  check('a module always fits its own mirror image across a face',
+    (() => {
+      for (const v of set.variants) {
+        for (let d = 0; d < 6; d++) {
+          if (v.profiles[d] !== faceProfile(v.cells, d)) return false;
+        }
+      }
+      return true;
+    })());
+  check('opposite() pairs the six directions', [0, 1, 2, 3, 4, 5]
+    .every((d) => opposite(opposite(d)) === d && opposite(d) !== d));
+
+  // No variant may be dead: something has to be placeable next to it in every
+  // direction, or it can never be chosen without an immediate contradiction.
+  // A variant with no partner at all in some direction can only ever be placed
+  // where that side is boundary. That is legitimate downward for the floor band
+  // and upward for the ceiling band, since those layers never have a wave cell
+  // there - and a bug anywhere else, because the solver would contradict the
+  // moment it chose one.
+  const dead = [];
+  for (let i = 0; i < set.variants.length; i++) {
+    const band = set.variants[i].band;
+    for (let d = 0; d < 6; d++) {
+      if (d === 5 && band === 'floor') continue;
+      if (d === 4 && band === 'ceiling') continue;
+      const row = set.adj[d][i];
+      let any = false;
+      for (let j = 0; j < row.length; j++) if (row[j]) { any = true; break; }
+      if (!any) dead.push(`${set.variants[i].name} dir${d}`);
+    }
+  }
+  check('no variant is dead where it could meet another', dead.length === 0,
+    dead.slice(0, 4).join(', '));
+  check('a pillar passes every band and is live in all six directions',
+    (() => {
+      for (let i = 0; i < set.variants.length; i++) {
+        if (set.variants[i].band !== 'any') continue;
+        for (let d = 0; d < 6; d++) {
+          const row = set.adj[d][i];
+          let any = false;
+          for (let j = 0; j < row.length; j++) if (row[j]) { any = true; break; }
+          if (!any) return false;
+        }
+      }
+      return true;
+    })());
+
+  check('adjacency is symmetric',
+    (() => {
+      for (let d = 0; d < 6; d++) {
+        const od = opposite(d);
+        for (let a = 0; a < set.variants.length; a++) {
+          for (let b = 0; b < set.variants.length; b++) {
+            if (set.adj[d][a][b] !== set.adj[od][b][a]) return false;
+          }
+        }
+      }
+      return true;
+    })());
+
+  check('every band has an empty module',
+    ['floor', 'interior', 'ceiling'].every((band) => {
+      const mask = set.bandMasks.get(band);
+      return set.variants.some((v, i) => mask[i] && v.solid === 0);
+    }));
+  check('every run family has an end cap',
+    ['floor.bench', 'floor.table', 'ceiling.beam'].every((fam) =>
+      set.variants.some((v) => v.name === `${fam}_end`)
+      && set.variants.some((v) => v.name === `${fam}_mid`)));
+  check('an end cap really is open on one side',
+    (() => {
+      const mid = set.variants.filter((v) => v.name === 'floor.bench_mid');
+      const end = set.variants.filter((v) => v.name === 'floor.bench_end');
+      const opens = end.some((v) => [0, 1, 2, 3].some((d) => v.profiles[d] === 0));
+      const runs = mid.some((v) => [0, 1, 2, 3].some((d) => v.profiles[d] !== 0));
+      return opens && runs;
+    })());
+
+  // The boundary rule, direction by direction.
+  const solidFace = 0x1ff;
+  check('a solid neighbour forbids nothing', forbiddenMask(0, solidFace) === 0);
+  check('an empty neighbour forbids everything', forbiddenMask(0, 0) === 0x1ff);
+  check('the rule is the same in all six directions',
+    [0, 1, 2, 3, 4, 5].every((d) => forbiddenMask(d, 0b101) === forbiddenMask(0, 0b101)));
+  check('a lamp needs a roof',
+    (() => {
+      const lamp = set.variants.find((v) => v.name === 'ceiling.lamp');
+      return !boundaryAllows(lamp, 4, 0) && boundaryAllows(lamp, 4, solidFace);
+    })());
+  check('nothing is placed with air under it',
+    set.variants.every((v) => v.profiles[5] === 0 || !boundaryAllows(v, 5, 0)));
+  check('an empty module is allowed against anything',
+    (() => {
+      const v = set.variants.find((x) => x.solid === 0);
+      return [0, 1, 2, 3, 4, 5].every((d) => boundaryAllows(v, d, 0));
+    })());
+}
+
+/* --------------------------------------------------- 13. the wave in anger */
+
+gate('13  wave function collapse');
+{
+  // A sealed room, three modules on a side inside, with real walls.
+  const room = (w, h, d) => {
+    const g = new VoxelGrid({ budget: 200000 });
+    for (let x = 0; x < w; x++) for (let y = 0; y < d; y++) for (let z = 0; z < h; z++) {
+      if (x === 0 || y === 0 || z === 0 || x === w - 1 || y === d - 1 || z === h - 1) g.set(x, y, z, 0);
+    }
+    return g;
+  };
+
+  const r = fillInteriors(room(11, 11, 11), { seed: 4, density: 0.7 });
+  check('a sealed room is filled', r.ok && r.solvedRegions === 1, `${r.solvedRegions} rooms`);
+  check('the fill places blocks', r.placed > 0, `${r.placed}`);
+  check('the skeleton is never overwritten',
+    (() => {
+      const skeleton = room(11, 11, 11);
+      let same = true;
+      skeleton.forEach((x, y, z, v) => { if (r.grid.get(x, y, z) !== v) same = false; });
+      return same;
+    })());
+  check('the fill only ever wrote into air',
+    r.grid.size >= room(11, 11, 11).size && r.grid.size === room(11, 11, 11).size + r.placed,
+    `${r.grid.size}`);
+  // "Floating" is not "has no block directly beneath it" - a table top is held
+  // up by its own legs one cell to either side. The property that actually
+  // matters is that no placed block belongs to a cluster hanging free of the
+  // skeleton, so flood through everything solid starting from the skeleton and
+  // require that it reaches every block the fill added.
+  check('nothing is left floating free of the skeleton',
+    (() => {
+      const skeleton = room(11, 11, 11);
+      const seen = new Set();
+      const stack = [];
+      const key = (x, y, z) => `${x},${y},${z}`;
+      skeleton.forEach((x, y, z) => { seen.add(key(x, y, z)); stack.push([x, y, z]); });
+      while (stack.length) {
+        const [x, y, z] = stack.pop();
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+          const p2 = [x + dx, y + dy, z + dz];
+          const k = key(p2[0], p2[1], p2[2]);
+          if (seen.has(k) || !r.grid.has(p2[0], p2[1], p2[2])) continue;
+          seen.add(k);
+          stack.push(p2);
+        }
+      }
+      let loose = 0;
+      r.grid.forEach((x, y, z) => { if (!seen.has(key(x, y, z))) loose++; });
+      return loose === 0;
+    })());
+  check('the coarse grid is offset to sit on the floor', r.offset.some((v) => v > 0),
+    r.offset.join(','));
+
+  // Determinism and seed sensitivity.
+  const a = fillInteriors(room(11, 11, 11), { seed: 4, density: 0.7 });
+  const b2 = fillInteriors(room(11, 11, 11), { seed: 5, density: 0.7 });
+  check('the same seed gives the same fill', a.placed === r.placed && a.grid.size === r.grid.size);
+  check('a different seed gives a different fill', b2.placed !== r.placed || b2.grid.size !== r.grid.size,
+    `${b2.placed} vs ${r.placed}`);
+
+  // Density does what it says.
+  const sparse = fillInteriors(room(14, 14, 14), { seed: 9, density: 0.05 });
+  const dense = fillInteriors(room(14, 14, 14), { seed: 9, density: 0.95 });
+  check('density changes how much is placed', dense.placed > sparse.placed,
+    `${sparse.placed} at 0.05, ${dense.placed} at 0.95`);
+
+  // Two rooms separated by a wall must be solved as two regions.
+  const pair = new VoxelGrid({ budget: 200000 });
+  for (let x = 0; x < 23; x++) for (let y = 0; y < 11; y++) for (let z = 0; z < 11; z++) {
+    if (x === 0 || y === 0 || z === 0 || x === 22 || y === 10 || z === 10 || x === 11) {
+      pair.set(x, y, z, 0);
+    }
+  }
+  const two = fillInteriors(pair, { seed: 2, density: 0.6 });
+  check('a dividing wall gives two regions', two.solvedRegions === 2, `${two.solvedRegions}`);
+
+  // Connectivity: the fill must not seal anything that was open.
+  check('nothing is newly cut off', two.connectivity.cutOff === 0, `${two.connectivity.cutOff}`);
+
+  // Every preset, tiled, at three densities.
+  for (const preset of PRESETS) {
+    const sk = buildSkeleton(buildPreset(preset.id).unit, [1, 1, 1], { budget: 4000000 });
+    for (const density of [0.2, 0.6, 0.9]) {
+      const f = fillInteriors(sk.grid, { seed: 17, density });
+      check(`${preset.name} at density ${density}: every region solved`,
+        f.ok && f.failedRegions === 0, f.ok ? `${f.failedRegions} failed` : f.message);
+      check(`${preset.name} at density ${density}: nothing sealed off`,
+        f.ok && f.connectivity.cutOff === 0, f.ok ? `${f.connectivity.cutOff}` : '');
+    }
+  }
+
+  // Contradictions are reported, not thrown, and not looped on forever.
+  const impossible = solve({
+    dims: [2, 1, 1],
+    active: Uint8Array.from([1, 1]),
+    allowed: Uint8Array.from([1, 0, 0, 1]),
+    weights: Float64Array.from([1, 1]),
+    adj: [
+      [Uint8Array.from([1, 0]), Uint8Array.from([0, 1])],   // +x: a-a, b-b only
+      [Uint8Array.from([1, 0]), Uint8Array.from([0, 1])],
+      [Uint8Array.from([1, 1]), Uint8Array.from([1, 1])],
+      [Uint8Array.from([1, 1]), Uint8Array.from([1, 1])],
+      [Uint8Array.from([1, 1]), Uint8Array.from([1, 1])],
+      [Uint8Array.from([1, 1]), Uint8Array.from([1, 1])],
+    ],
+    seed: 1,
+    retries: 3,
+  });
+  check('an impossible region fails cleanly', impossible.ok === false && !!impossible.failure);
+  check('retries are capped', impossible.attempts === 4, `${impossible.attempts}`);
+
+  check('a build too small for one module is reported',
+    (() => {
+      const tiny = new VoxelGrid({ budget: 100 });
+      tiny.set(0, 0, 0, 0);
+      tiny.set(1, 1, 1, 0);
+      const t = fillInteriors(tiny);
+      return t.ok === false && typeof t.message === 'string';
+    })());
+
+  // Partitions run floor to ceiling by construction, so a legal wave can still
+  // cut a room in two. That has to be caught inside the retry loop, not merely
+  // reported afterwards, and it has to hold over seeds rather than for one.
+  {
+    let worst = 0, walls = 0, runs = 0, bad = 0;
+    for (let seed = 1; seed <= 12; seed++) {
+      for (const density of [0.3, 0.7, 0.95]) {
+        const f = fillInteriors(room(14, 11, 14), { seed, density });
+        runs++;
+        if (f.connectivity.cutOff > worst) worst = f.connectivity.cutOff;
+        if (f.connectivity.cutOff > 0) bad++;
+        for (const [name, c] of f.byFamily) if (name.startsWith('wall.')) walls += c;
+        if (f.regions.some((r) => r.ok && r.orphans > 0)) bad++;
+      }
+    }
+    check(`no seed seals a room off (${runs} runs)`, worst === 0 && bad === 0,
+      `worst ${worst}, ${bad} bad runs`);
+    check('partitions are actually being built', walls > 0, `${walls} wall cells`);
+  }
+  check('every region reports its orphan count',
+    r.regions.every((x) => !x.ok || typeof x.orphans === 'number'));
+
+  check('the rng is deterministic',
+    (() => {
+      const p = mulberry32(12345), q = mulberry32(12345);
+      for (let i = 0; i < 50; i++) if (p() !== q()) return false;
+      return mulberry32(1)() !== mulberry32(2)();
+    })());
+}
+
+/* --------------------------------------------- 14. clearing open space out */
+
+gate('14  open space as air');
+{
+  const sk = buildSkeleton(buildPreset('cloister-cells').unit, [1, 1, 1], { budget: 4000000 });
+  const none = buildExport(sk.grid, { name: 'air none', air: 'none' });
+  const roofed = buildExport(sk.grid, { name: 'air roofed', air: 'roofed' });
+  const box = buildExport(sk.grid, { name: 'air box', air: 'box' });
+
+  check('the air mode is reported back', none.air === 'none' && roofed.air === 'roofed' && box.air === 'box');
+  check('an unknown air mode falls back to leaving terrain',
+    buildExport(sk.grid, { name: 'x', air: 'nonsense' }).air === 'none');
+
+  const readAir = (bytes) => {
+    const s = readMcStructure(bytes);
+    return { solid: s.solidCount, size: s.size, air: s.airCount };
+  };
+  const a0 = readAir(none.single), a1 = readAir(roofed.single), a2 = readAir(box.single);
+  check('the block count is the same whatever the air mode',
+    a0.solid === a1.solid && a1.solid === a2.solid, `${a0.solid}/${a1.solid}/${a2.solid}`);
+  check('leaving terrain writes no air at all', a0.air === 0, `${a0.air}`);
+  check('clearing under the build writes air', a1.air > 0, `${a1.air}`);
+  // For a building whose roof covers its whole footprint these two agree, and
+  // that is correct: there is nothing in the box that is not under the roof.
+  check('clearing the whole box writes at least as much air', a2.air >= a1.air,
+    `${a2.air} vs ${a1.air}`);
+  check('on a stepped shape the two modes differ',
+    (() => {
+      const step = new VoxelGrid({ budget: 1000 });
+      for (let y = 0; y < 6; y++) step.set(0, y, 0, 0);    // tall column
+      step.set(3, 0, 0, 0);                                // one low block away from it
+      const rf = buildExport(step, { name: 'step roofed', air: 'roofed' });
+      const bx = buildExport(step, { name: 'step box', air: 'box' });
+      return readMcStructure(bx.single).airCount > readMcStructure(rf.single).airCount;
+    })());
+  check('the whole box really is every empty cell',
+    a2.air === a2.size[0] * a2.size[1] * a2.size[2] - a2.solid,
+    `${a2.air}`);
+
+  // The roofed test itself, on a shape where the answer is obvious.
+  const post = new VoxelGrid({ budget: 1000 });
+  for (let y = 0; y < 5; y++) post.set(0, y, 0, 0);       // a column 5 tall at x=0,z=0
+  post.set(2, 0, 0, 0);                                   // a single block at x=2
+  const t = roofedTest(post, post.bounds(true));
+  check('under the column counts as roofed', t(0, 2, 0) === true);
+  check('the top of the column is not under itself', t(0, 4, 0) === false);
+  check('beside the column is not roofed', t(2, 0, 0) === false && t(1, 2, 0) === false);
+  check('outside the box is not roofed', t(-1, 0, 0) === false && t(9, 0, 0) === false);
+
+  // Split pieces must be written from their chunk corner, not their own
+  // lowest block, or they land skew by the difference.
+  const tall = buildSkeleton(buildPreset('arcade').unit, [3, 3, 2], { budget: 4000000 });
+  const pieces = buildExport(tall.grid, { name: 'corner test', chunk: [64, 64, 64], air: 'roofed' });
+  check('a split build still keeps every block',
+    pieces.structures.reduce((n, s) => n + s.cells, 0) === pieces.cells);
+  check('every piece is written from its chunk corner',
+    pieces.structures.every((s, i) => {
+      const parsed = readMcStructure(s.bytes);
+      const limit = [0, 1, 2].map((a) => Math.min(64, pieces.size[a] - s.offset[a]));
+      return parsed.size.join() === limit.join();
+    }), pieces.structures.map((s) => readMcStructure(s.bytes).size.join('x')).slice(0, 3).join(' '));
+  check('pieces tile the whole build exactly',
+    pieces.structures.every((s) => [0, 1, 2].every((a) =>
+      s.offset[a] % 64 === 0 && s.offset[a] + s.size[a] <= pieces.size[a])));
 }
 
 /* ------------------------------------------------------------- reporting */

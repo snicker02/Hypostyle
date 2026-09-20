@@ -21,6 +21,22 @@
 //     written faithfully either way and the caller is told it is oversized.
 //   * It does not assume the player will read a table of offsets. The pack
 //     carries commands.txt: the literal command lines, in order, to paste.
+//
+// OPEN SPACE. By default an empty cell is written as -1, which means "leave
+// whatever is already there" - the build drops into terrain and the terrain
+// shows through every window and fills every room. The air option writes
+// explicit minecraft:air instead, so the structure clears its own space:
+//
+//   none     -1 everywhere. Terrain shows through. The old behaviour.
+//   roofed   clear every empty cell that has part of the build above it in the
+//            same column. Interiors, aisles and undercrofts come out hollow;
+//            the sky above the roof and the ground beside the walls are left
+//            alone. This is almost always the one you want.
+//   box      clear every empty cell in the bounding box. Levels the site.
+//
+// "Roofed" is computed once over the WHOLE build and then queried per piece, so
+// a split build gets the same answer in every piece - work it out per piece and
+// the topmost piece has no roof above it and comes out solid.
 
 import {
   VoxelGrid, valueMaterial, Palette, buildMcStructure, splitGrid, needsSplit,
@@ -66,24 +82,45 @@ export function buildExport(grid, opts = {}) {
   const chunk = opts.chunk || [MAX_STRUCTURE_EDGE, MAX_STRUCTURE_EDGE, MAX_STRUCTURE_EDGE];
 
   const bounds = mc.bounds(true);
+  const air = AIR_MODES.includes(opts.air) ? opts.air : 'none';
+  const roofed = air === 'roofed' ? roofedTest(mc, bounds) : null;
+  const airWhereWorld = air === 'box' ? () => true : roofed;
+
   const split = splitGrid(mc, { chunk });
-  const structures = split.chunks.map((c) => ({
-    name: `${slug}_${String(c.index).padStart(3, '0')}`,
-    bytes: buildMcStructure(c.grid, { palette }).bytes,
-    offset: c.offset,
-    cells: c.cells,
-    size: c.size,
-  }));
+  const structures = split.chunks.map((c) => {
+    // Pieces are written from their chunk corner, not from their own lowest
+    // block. Otherwise a piece whose content starts part way in would be
+    // placed at the offset of the chunk and drawn from the offset of the
+    // content, and it would sit skew by that difference.
+    const size = [0, 1, 2].map((a) => Math.min(chunk[a], bounds.size[a] - c.offset[a]));
+    const built = buildMcStructure(c.grid, {
+      palette,
+      bounds: { min: [0, 0, 0], size },
+      includeAir: air !== 'none',
+      airWhere: airWhereWorld
+        ? (x, y, z) => airWhereWorld(x + c.offset[0], y + c.offset[1], z + c.offset[2])
+        : null,
+    });
+    return {
+      name: `${slug}_${String(c.index).padStart(3, '0')}`,
+      bytes: built.bytes,
+      offset: c.offset,
+      cells: c.cells,
+      size,
+    };
+  });
 
   // The whole build as one file, always written, oversized or not.
-  const whole = buildMcStructure(mc, { palette }).bytes;
+  const whole = buildMcStructure(mc, {
+    palette, includeAir: air !== 'none', airWhere: airWhereWorld,
+  }).bytes;
   const oversize = needsSplit(mc);
 
   const guide = placementGuide(split, { baseName: slug, title: name });
   const commands = commandScript({
     title: name, namespace, split, bounds, oversize, wholeName: slug,
   });
-  const readme = packReadme(name, split, bounds, oversize, opts.notes || []);
+  const readme = packReadme(name, split, bounds, oversize, air, opts.notes || []);
 
   const pack = buildMcPack({
     name,
@@ -110,6 +147,7 @@ export function buildExport(grid, opts = {}) {
     single: whole,
     singleName: `${slug}.mcstructure`,
     oversize,
+    air,
     maxEdge: MAX_STRUCTURE_EDGE,
     namespace,
     size: bounds.size,
@@ -190,7 +228,27 @@ function commandScript({ title, namespace, split, bounds, oversize, wholeName })
 
 function tilde(n) { return n === 0 ? '~' : `~${n}`; }
 
-function packReadme(name, split, bounds, oversize, notes) {
+export const AIR_MODES = Object.freeze(['none', 'roofed', 'box']);
+
+/**
+ * Is this empty cell under the build? One pass records the highest solid block
+ * in every column; anything below that line is inside the building's envelope.
+ * Minecraft axes, so the column runs along y.
+ */
+export function roofedTest(grid, bounds) {
+  const [sx, , sz] = bounds.size;
+  const top = new Int32Array(sx * sz).fill(-1);
+  grid.forEach((x, y, z) => {
+    const i = x * sz + z;
+    if (y > top[i]) top[i] = y;
+  });
+  return (x, y, z) => {
+    if (x < 0 || z < 0 || x >= sx || z >= sz) return false;
+    return y < top[x * sz + z];
+  };
+}
+
+function packReadme(name, split, bounds, oversize, air, notes) {
   const lines = [];
   lines.push(name);
   lines.push('='.repeat(name.length));
@@ -212,6 +270,19 @@ function packReadme(name, split, bounds, oversize, notes) {
   lines.push('');
   lines.push('Pieces are aligned to a single grid and butt together exactly; there');
   lines.push('is no overlap to trim.');
+  lines.push('');
+  if (air === 'none') {
+    lines.push('Open space is left as it is: the structure only adds blocks, so any');
+    lines.push('terrain it lands in will show through the windows and fill the rooms.');
+    lines.push('Build in the air, or re-export with open space cleared.');
+  } else if (air === 'roofed') {
+    lines.push('Open space under the build is cleared to air, so the interiors arrive');
+    lines.push('hollow even if you place this in a hillside. Ground beside the walls');
+    lines.push('and sky above the roof are left alone.');
+  } else {
+    lines.push('Every empty cell in the bounding box is cleared to air, so the whole');
+    lines.push('site is levelled to make room for the build.');
+  }
   if (oversize) {
     lines.push('');
     lines.push('This build is over 64 blocks on at least one axis, which is why it is');

@@ -30,7 +30,10 @@ export const AIR_INDEX = -1;
  *   palette       Palette instance (default: a fresh one)
  *   origin        structure_world_origin (default [0,0,0])
  *   bounds        explicit {min,size} instead of the grid's own bounds
- *   includeAir    write an explicit air palette entry instead of -1
+ *   includeAir    write an explicit air palette entry instead of -1, so the
+ *                 structure clears ground rather than leaving it
+ *   airWhere      (x,y,z) => boolean in local coordinates; which empty cells
+ *                 the explicit air applies to
  * @returns {{bytes:Uint8Array, size:number[], origin:number[],
  *            paletteEntries:object[], cellCount:number}}
  */
@@ -61,10 +64,27 @@ export function buildMcStructure(grid, opts = {}) {
     return i;
   }
 
-  const airIndex = opts.includeAir ? internAir(entries, entryIndex) : AIR_INDEX;
-
-  const layer0 = new Int32Array(total).fill(airIndex);
+  // -1 leaves whatever is already in the world alone. An explicit air entry
+  // clears it instead. airWhere(x, y, z) - local structure coordinates - picks
+  // which empty cells get cleared; without it, all of them do.
+  const layer0 = new Int32Array(total).fill(AIR_INDEX);
   const layer1 = new Int32Array(total).fill(AIR_INDEX);
+  let airIndex = AIR_INDEX;
+  if (opts.includeAir) {
+    airIndex = internAir(entries, entryIndex);
+    const where = opts.airWhere;
+    if (!where) {
+      layer0.fill(airIndex);
+    } else {
+      for (let ix = 0; ix < sx; ix++) {
+        for (let iy = 0; iy < sy; iy++) {
+          for (let iz = 0; iz < sz; iz++) {
+            if (where(ix, iy, iz)) layer0[(ix * sy + iy) * sz + iz] = airIndex;
+          }
+        }
+      }
+    }
+  }
 
   let cellCount = 0;
   grid.forEach((x, y, z, value) => {
@@ -130,7 +150,7 @@ function stateNode(v) {
  * Parse a .mcstructure back into a plain description. Used by the validation
  * harness to prove the writer round-trips.
  * @returns {{size:number[], origin:number[], palette:object[],
- *            layers:number[][], solidCount:number}}
+ *            layers:number[][], solidCount:number, airCount:number}}
  */
 export function readMcStructure(bytes) {
   const { root } = readNBT(bytes);
@@ -146,6 +166,18 @@ export function readMcStructure(bytes) {
     ),
     version: entry.value.version.value,
   }));
-  const solidCount = layers[0].reduce((n, i) => n + (i >= 0 ? 1 : 0), 0);
-  return { size, origin, palette, layers, solidCount, formatVersion: v.format_version.value };
+  // An explicit air entry is a written block as far as the file is concerned,
+  // but it is not part of the build. Count the two apart or a structure that
+  // clears its own space looks like it has twice the blocks it has.
+  const airIds = new Set();
+  palette.forEach((b, i) => { if (b.name === 'minecraft:air') airIds.add(i); });
+  let solidCount = 0, airCount = 0;
+  for (const i of layers[0]) {
+    if (i < 0) continue;
+    if (airIds.has(i)) airCount++; else solidCount++;
+  }
+  return {
+    size, origin, palette, layers, solidCount, airCount,
+    formatVersion: v.format_version.value,
+  };
 }

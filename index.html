@@ -278,10 +278,38 @@
     </section>
 
     <section>
+      <h2>Interiors</h2>
+      <div class="row">
+        <label for="wfcDensity">Density</label>
+        <input type="range" id="wfcDensity" min="0" max="100" value="60" class="grow">
+        <span class="note" style="margin:0" id="wfcDensityNote">60</span>
+      </div>
+      <div class="row">
+        <label for="wfcSeed">Seed</label>
+        <input type="number" id="wfcSeed" min="1" max="999999" value="1">
+        <button id="wfcReseed">Reseed</button>
+      </div>
+      <div class="row">
+        <button id="wfcFill" class="primary grow">Fill interiors</button>
+        <button id="wfcClear">Clear</button>
+      </div>
+      <dl class="stats" id="wfcStats"></dl>
+      <p class="note" id="wfcNote">Build a structure, then fill the rooms inside it.</p>
+    </section>
+
+    <section>
       <h2>Export to Bedrock</h2>
       <div class="row">
         <label for="exportName">Name</label>
         <input type="text" id="exportName" value="hypostyle hall">
+      </div>
+      <div class="row">
+        <label for="airMode">Open space</label>
+        <select id="airMode" class="grow">
+          <option value="none" selected>leave terrain</option>
+          <option value="roofed">clear under the build</option>
+          <option value="box">clear the whole box</option>
+        </select>
       </div>
       <div class="row">
         <label for="chunkSize">Pieces</label>

@@ -11,6 +11,16 @@
 // plain (x,y,z) -> (x,z,y) swap would be a reflection and would quietly turn
 // every 4_1 screw axis into a 4_3 - the build would look fine and be the wrong
 // hand. The grid is then normalised so its minimum corner sits at the origin.
+//
+// Two things this module deliberately does NOT do:
+//
+//   * It does not refuse to write an oversized single .mcstructure. Bedrock's
+//     structure BLOCK clamps its size fields to 64 per axis, but the file
+//     format has no such limit and /structure load takes the size from the
+//     file. Whether a given build loads is the game's business; the file is
+//     written faithfully either way and the caller is told it is oversized.
+//   * It does not assume the player will read a table of offsets. The pack
+//     carries commands.txt: the literal command lines, in order, to paste.
 
 import {
   VoxelGrid, valueMaterial, Palette, buildMcStructure, splitGrid, needsSplit,
@@ -40,15 +50,17 @@ export function toMinecraftAxes(grid) {
  * @param {import('./blockcore/index.js').VoxelGrid} grid  in app (c-up) axes
  * @param {object} opts
  *   name        build name, used for files and the pack
- *   chunk       [x,y,z] piece size (default 64 cubed, Bedrock's own limit)
+ *   chunk       [x,y,z] piece size (default 64 cubed, the structure block limit)
+ *   namespace   structure namespace (default 'hypostyle')
  *   flattened   modern block names (default true)
  *   notes       extra lines for the readme in the pack
- * @returns {{pack:Uint8Array, filename:string, pieces:number, guide:string,
- *            single:?Uint8Array, size:number[], cells:number, structures:Array}}
+ * @returns {object} pack bytes, the whole-build single structure, the command
+ *   script, the placement guide, and the numbers behind all of them.
  */
 export function buildExport(grid, opts = {}) {
   const name = opts.name || 'hypostyle';
   const slug = sanitise(name);
+  const namespace = sanitise(opts.namespace || 'hypostyle');
   const palette = new Palette({ flattened: opts.flattened !== false });
   const mc = toMinecraftAxes(grid);
   const chunk = opts.chunk || [MAX_STRUCTURE_EDGE, MAX_STRUCTURE_EDGE, MAX_STRUCTURE_EDGE];
@@ -63,23 +75,29 @@ export function buildExport(grid, opts = {}) {
     size: c.size,
   }));
 
+  // The whole build as one file, always written, oversized or not.
+  const whole = buildMcStructure(mc, { palette }).bytes;
+  const oversize = needsSplit(mc);
+
   const guide = placementGuide(split, { baseName: slug, title: name });
-  const readme = packReadme(name, split, bounds, opts.notes || []);
+  const commands = commandScript({
+    title: name, namespace, split, bounds, oversize, wholeName: slug,
+  });
+  const readme = packReadme(name, split, bounds, oversize, opts.notes || []);
 
   const pack = buildMcPack({
     name,
-    namespace: 'hypostyle',
+    namespace,
     description: `${name} - ${mc.size.toLocaleString()} blocks in ${structures.length} piece`
                + `${structures.length === 1 ? '' : 's'}, built by Hypostyle.`,
     seed: `${slug}:${mc.size}:${bounds.size.join('x')}`,
     structures,
     extraFiles: [
+      { path: 'commands.txt', data: commands },
       { path: 'placement-guide.txt', data: guide },
       { path: 'README.txt', data: readme },
     ],
   });
-
-  const single = structures.length === 1 ? structures[0].bytes : null;
 
   return {
     pack: pack.bytes,
@@ -87,17 +105,92 @@ export function buildExport(grid, opts = {}) {
     pieces: structures.length,
     guide,
     readme,
-    single,
+    commands,
+    commandsName: `${slug}-commands.txt`,
+    single: whole,
     singleName: `${slug}.mcstructure`,
+    oversize,
+    maxEdge: MAX_STRUCTURE_EDGE,
+    namespace,
     size: bounds.size,
     cells: mc.size,
     structures,
-    needsSplit: needsSplit(mc),
+    needsSplit: oversize,
     manifest: pack.manifest,
   };
 }
 
-function packReadme(name, split, bounds, notes) {
+/**
+ * The literal lines to type in game. Offsets are relative (~), so the player
+ * stands where they want the build to start and pastes.
+ */
+function commandScript({ title, namespace, split, bounds, oversize, wholeName }) {
+  const lines = [];
+  lines.push(`${title} - commands`);
+  lines.push('='.repeat(Math.max(24, title.length + 11)));
+  lines.push('');
+  lines.push('Before anything:');
+  lines.push('  1. Open the .mcpack to import it. Bedrock files it with your packs.');
+  lines.push('  2. Edit the world, Behaviour Packs, activate this pack, Cheats on.');
+  lines.push('     Creative mode is easiest.');
+  lines.push('  3. Leave and re-enter the world so the structures register.');
+  lines.push('');
+
+  if (split.chunks.length === 0) {
+    lines.push('Nothing to place: the build is empty.');
+    return lines.join('\n');
+  }
+
+  lines.push('Then stand where you want the corner of the build to be and run these');
+  lines.push('in order. ~ ~ ~ means "here", so every piece lands relative to where');
+  lines.push('you are standing - do not move between commands.');
+  lines.push('');
+  lines.push('Blocks are placed east (+x), up (+y) and south (+z) from you.');
+  lines.push(`Overall footprint: ${bounds.size.join(' x ')} blocks.`);
+  lines.push('');
+  lines.push('-'.repeat(62));
+  lines.push('');
+
+  const base = split.chunks[0].offset;
+  for (const c of split.chunks) {
+    const rel = [0, 1, 2].map((a) => c.offset[a] - base[a]);
+    const nm = `${wholeName}_${String(c.index).padStart(3, '0')}`;
+    lines.push(`/structure load ${namespace}:${nm} ${tilde(rel[0])} ${tilde(rel[1])} ${tilde(rel[2])}`);
+  }
+
+  lines.push('');
+  lines.push('-'.repeat(62));
+  lines.push('');
+  lines.push(`${split.chunks.length} command${split.chunks.length === 1 ? '' : 's'}, `
+    + `${split.totalCells.toLocaleString()} blocks total.`);
+  lines.push('');
+  lines.push('Chat takes one command at a time. For a long list, use a command block');
+  lines.push('on Repeat / Always Active, or paste them one by one.');
+  lines.push('');
+  lines.push('If a piece lands in the wrong spot you moved between commands. Return');
+  lines.push('to where you started and run that line again, or use the absolute');
+  lines.push('form: replace ~ ~ ~ with your starting x y z plus the offsets in');
+  lines.push('placement-guide.txt.');
+  lines.push('');
+  lines.push('Structure block instead of commands: place one, set it to Load, type');
+  lines.push(`the name (for example ${namespace}:${wholeName}_000), set the relative`);
+  lines.push('offset to the numbers in placement-guide.txt, then press Load.');
+
+  if (oversize) {
+    lines.push('');
+    lines.push('On the single-file export: this build is over 64 blocks on at least');
+    lines.push('one axis. The whole-build .mcstructure the app writes is a valid');
+    lines.push('file, but a structure block cannot show more than 64 per axis, so');
+    lines.push('load it with /structure load rather than through the block UI - and');
+    lines.push('if the game refuses it, use the pieces above.');
+  }
+
+  return lines.join('\n');
+}
+
+function tilde(n) { return n === 0 ? '~' : `~${n}`; }
+
+function packReadme(name, split, bounds, oversize, notes) {
   const lines = [];
   lines.push(name);
   lines.push('='.repeat(name.length));
@@ -107,17 +200,25 @@ function packReadme(name, split, bounds, notes) {
   lines.push('');
   for (const note of notes) lines.push(note);
   if (notes.length) lines.push('');
-  lines.push('To use:');
-  lines.push('  1. Open this .mcpack to import it, then add it to a world as a');
-  lines.push('     behaviour pack. Creative mode and cheats on.');
-  lines.push('  2. Place a structure block, set it to Load, and type the structure');
-  lines.push('     name from placement-guide.txt.');
-  lines.push('  3. Or run /structure load hypostyle:<name> ~ ~ ~ while standing at');
-  lines.push('     the spot you want the piece to start.');
+  lines.push('Read commands.txt. It has the exact command lines to paste, in order.');
+  lines.push('placement-guide.txt has the same information as a table of offsets if');
+  lines.push('you would rather use structure blocks.');
   lines.push('');
-  lines.push('Pieces are aligned to a single grid: put piece 000 down first and use');
-  lines.push('the offsets in placement-guide.txt for the rest. They butt together');
-  lines.push('exactly; there is no overlap to trim.');
+  lines.push('Short version:');
+  lines.push('  1. Open this .mcpack to import it, then activate it as a behaviour');
+  lines.push('     pack on the world. Cheats on, creative mode.');
+  lines.push('  2. Stand where the build should start.');
+  lines.push('  3. Run the commands in commands.txt in order, without moving.');
+  lines.push('');
+  lines.push('Pieces are aligned to a single grid and butt together exactly; there');
+  lines.push('is no overlap to trim.');
+  if (oversize) {
+    lines.push('');
+    lines.push('This build is over 64 blocks on at least one axis, which is why it is');
+    lines.push('in pieces. The app will still export the whole thing as one');
+    lines.push('.mcstructure; that file is only loadable by command, not by the');
+    lines.push('structure block UI.');
+  }
   lines.push('');
   lines.push('The build is exported with the crystallographic c axis on Minecraft\'s');
   lines.push('y axis, so the cell height you authored is the height you get.');

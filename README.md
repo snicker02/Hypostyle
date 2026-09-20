@@ -1,4 +1,4 @@
-# Hypostyle v0.1.0
+# Hypostyle v0.1.1
 
 Procedural Minecraft Bedrock architecture from a crystallographic symmetry
 skeleton. You author one asymmetric unit; a space group expands it into
@@ -25,7 +25,7 @@ engine/
   blockcore/        shared block engine (see "blockcore" below)
 tools/
   gen-spacegroups.py  regenerates engine/spacegroups.js from spglib
-  validate.mjs        headless validation, 193 checks
+  validate.mjs        headless validation, 209 checks
 ```
 
 Run `node tools/validate.mjs` from the repo root. No build step, no
@@ -122,6 +122,30 @@ reconciled into one canonical standalone module that both projects import.
 Targets Bedrock 1.26.51: block states are written flat, `format_version 1`
 structures, `format_version 2` manifests, deterministic seeded UUIDs so
 re-exporting the same build produces a byte-identical pack.
+
+## Export
+
+Three buttons, one build:
+
+* **.mcpack** — the pack Bedrock imports by opening it. Contains the build
+  split into aligned pieces, plus `commands.txt` (the literal
+  `/structure load` lines in order), `placement-guide.txt` (the same offsets as
+  a table, for structure blocks) and `README.txt`.
+* **Single .mcstructure** — the whole build in one file, always written, at any
+  size. Over 64 blocks on an axis the structure block UI will not show it,
+  because that UI clamps its size fields to 64; the file format itself has no
+  such limit and `/structure load` takes the size from the file. The app warns
+  and exports rather than refusing.
+* **Commands** — just `commands.txt`, without opening the pack.
+
+Commands are relative (`~`), so the player stands where the build should start
+and pastes in order. The first line is always `~ ~ ~`.
+
+```
+/structure load hypostyle:arcade_000 ~ ~ ~
+/structure load hypostyle:arcade_001 ~ ~ ~64
+/structure load hypostyle:arcade_002 ~64 ~ ~
+```
 
 ## Presets
 

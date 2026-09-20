@@ -473,6 +473,69 @@ gate('9  axis map into Minecraft');
   }));
   check('piece cell counts sum to the whole',
     exported.structures.reduce((n, s) => n + s.cells, 0) === exported.cells);
+
+  // The single .mcstructure is always written, whatever the size.
+  check('a whole-build structure is always produced', exported.single instanceof Uint8Array);
+  check('the whole-build structure holds every block',
+    readMcStructure(exported.single).solidCount === exported.cells,
+    `${readMcStructure(exported.single).solidCount} vs ${exported.cells}`);
+  check('the whole-build structure carries the full size',
+    readMcStructure(exported.single).size.join('x') === exported.size.join('x'),
+    readMcStructure(exported.single).size.join('x'));
+
+  // Force a build past the 64 limit and check it still exports in one file.
+  const bigUnit = buildPreset('arcade').unit;
+  const big = buildSkeleton(bigUnit, [3, 3, 2], { budget: 4000000 });
+  const bigExport = buildExport(big.grid, { name: 'oversize test', chunk: [64, 64, 64] });
+  check('an oversized build still exports as one structure',
+    bigExport.single instanceof Uint8Array && bigExport.oversize === true,
+    `oversize=${bigExport.oversize}`);
+  check('oversized: bounds really do exceed 64',
+    Math.max(...bigExport.size) > 64, bigExport.size.join('x'));
+  check('oversized: the single file still round trips',
+    readMcStructure(bigExport.single).solidCount === bigExport.cells);
+  check('oversized: pieces are produced as well', bigExport.pieces > 1, `${bigExport.pieces}`);
+
+  // commands.txt: one /structure load per piece, in the pack and on the result.
+  const cmdLines = bigExport.commands.split('\n').filter((l) => l.startsWith('/structure load'));
+  check('commands: one load line per piece', cmdLines.length === bigExport.pieces,
+    `${cmdLines.length} lines vs ${bigExport.pieces} pieces`);
+  check('commands: every line is namespaced',
+    cmdLines.every((l) => l.includes(`${bigExport.namespace}:`)));
+  check('commands: every line has three relative coordinates',
+    cmdLines.every((l) => {
+      const parts = l.trim().split(/\s+/);
+      return parts.length === 6 && parts.slice(3).every((p) => /^~(-?\d+)?$/.test(p));
+    }), cmdLines[1] || '');
+  check('commands: the first piece sits at the player',
+    cmdLines[0].endsWith(' ~ ~ ~'), cmdLines[0]);
+  check('commands: offsets match the placement guide',
+    (() => {
+      const base = bigExport.structures[0].offset;
+      return bigExport.structures.every((s, i) => {
+        const rel = [0, 1, 2].map((a) => s.offset[a] - base[a]);
+        const want = rel.map((n) => (n === 0 ? '~' : `~${n}`)).join(' ');
+        return cmdLines[i].endsWith(` ${want}`);
+      });
+    })());
+  check('commands: the oversize caveat is stated', bigExport.commands.includes('64'));
+  check('commands.txt is inside the pack',
+    (() => {
+      const entries = readZipDirectory(bigExport.pack);
+      return entries !== null && entries.some((e) => e.name === 'commands.txt' && e.crcOk);
+    })());
+  check('the pack also carries the guide and readme',
+    (() => {
+      const names = (readZipDirectory(bigExport.pack) || []).map((e) => e.name);
+      return names.includes('placement-guide.txt') && names.includes('README.txt');
+    })());
+  check('a single-piece build gets a single command',
+    (() => {
+      const small = buildExport(buildSkeleton(buildPreset('cloister').unit, [1, 1, 1],
+        { budget: 4000000 }).grid, { name: 'small test', chunk: [64, 64, 64] });
+      const ls = small.commands.split('\n').filter((l) => l.startsWith('/structure load'));
+      return small.oversize === false && ls.length === 1 && ls[0].endsWith(' ~ ~ ~');
+    })());
 }
 
 /* -------------------------------------------------------------- 10. rooms */

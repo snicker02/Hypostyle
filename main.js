@@ -14,7 +14,7 @@ import {
   VoxelGrid, Palette, MATERIALS, meshGrid, raycastGrid, raycastPlane, rayFromNDC,
 } from './engine/blockcore/index.js';
 
-export const HYPOSTYLE_VERSION = '0.1.0';
+export const HYPOSTYLE_VERSION = '0.1.1';
 
 const $ = (id) => document.getElementById(id);
 const palette = new Palette();
@@ -615,6 +615,7 @@ function wireControls() {
 
   $('exportPack').addEventListener('click', () => doExport('pack'));
   $('exportStructure').addEventListener('click', () => doExport('single'));
+  $('exportCommands').addEventListener('click', () => doExport('commands'));
 
   window.addEventListener('resize', () => { state.dirty = true; });
 }
@@ -655,19 +656,28 @@ function doExport(kind) {
   const ms = performance.now() - t0;
 
   if (kind === 'single') {
-    if (!result.single) {
+    // The whole build, always written. Over 64 on an axis it will not open in
+    // the structure block UI, but the file is valid and /structure load reads
+    // its size from the file - so warn, do not refuse.
+    download(result.single, result.singleName);
+    if (result.oversize) {
       $('exportNote').className = 'note warn';
-      $('exportNote').textContent = `Too big for one structure: ${result.size.join(' x ')} `
-        + `needs ${result.pieces} pieces. Use the .mcpack.`;
+      $('exportNote').textContent = `${result.singleName}: ${result.size.join(' x ')} exceeds `
+        + `${result.maxEdge} on an axis. Load it with /structure load ${result.namespace}:`
+        + `${result.singleName.replace(/\.mcstructure$/, '')} - the structure block UI caps at `
+        + `${result.maxEdge}. The .mcpack has it in ${result.pieces} pieces if the game refuses it.`;
+      say('exported whole build, oversized');
       return;
     }
-    download(result.single, result.singleName);
+  } else if (kind === 'commands') {
+    download(new TextEncoder().encode(result.commands), result.commandsName, 'text/plain');
   } else {
     download(result.pack, result.filename);
   }
   $('exportNote').className = 'note good';
   $('exportNote').textContent = `${result.cells.toLocaleString()} blocks, ${result.pieces} piece`
-    + `${result.pieces === 1 ? '' : 's'}, ${result.size.join(' x ')} in ${ms.toFixed(0)} ms.`;
+    + `${result.pieces === 1 ? '' : 's'}, ${result.size.join(' x ')} in ${ms.toFixed(0)} ms.`
+    + (kind === 'pack' ? ' Pack includes commands.txt.' : '');
   say('exported');
 }
 

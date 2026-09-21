@@ -1,4 +1,4 @@
-# Hypostyle v0.2.1
+# Hypostyle v0.3.0
 
 Procedural Minecraft Bedrock architecture from a crystallographic symmetry
 skeleton. You author one asymmetric unit; a space group expands it into
@@ -30,7 +30,7 @@ engine/
   blockcore/        shared block engine (see "blockcore" below)
 tools/
   gen-spacegroups.py  regenerates engine/spacegroups.js from spglib
-  validate.mjs        headless validation, 292 checks
+  validate.mjs        headless validation, 732 checks
 ```
 
 Run `node tools/validate.mjs` from the repo root. No build step, no
@@ -164,19 +164,42 @@ and pastes in order. The first line is always `~ ~ ~`.
 
 ## Presets
 
-Five worked units, each authored in a single asymmetric unit:
+Thirty-two worked examples, each a single asymmetric unit, grouped in the UI by
+crystal system. Twenty-eight distinct space groups, orders from 4 to 192.
 
-| Preset | Group | Cell | Authored | In cell | Fill |
-|---|---|---|---|---|---|
-| Hypostyle hall | P4mm (99) | 24³ | 688 | 2,968 | 21.5% |
-| Arcade and clerestory | Pmm2 (25) | 24×24×36 | 1,045 | 4,180 | 20.2% |
-| Cloister cells | P4mm (99) | 24³ | 559 | 3,164 | 22.9% |
-| Staggered hall | I4mm (107) | 36³ | 1,552 | 13,512 | 29.0% |
-| Cubic crypt | Pm-3m (221) | 24³ | 232 | 6,032 | 43.6% |
+**Tetragonal** — Hypostyle hall (P4mm), Cloister cells (P4mm), Staggered hall
+(I4mm), Spiral stair (P4₁), Spiral stair other hand (P4₃), Lantern tower
+(P4/mmm), Pinwheel court (P4), Glide piers (P4bm), Water court (P4/n), Lattice
+tower (I4), Deep arcade (P4cc), Hall of tombs (I4/mmm), Vaulted chamber (P-4m2),
+Helical frame (I4₁).
 
-Collision counts in the expander are cosmetic — two orbit images landing on the
-same block with different materials. First write wins, deterministically.
-Staggered hall and cubic crypt have them by construction; the others are clean.
+**Orthorhombic** — Arcade and clerestory (Pmm2), Basilica (Pmm2), Chiral bays
+(P222), Zigzag wall (Pba2), Long gallery (Cmm2), Terraced steps (P2₁2₁2₁),
+Transept (Cmcm), Open frame (Fmm2), Braced block (Ibam), Cellular rows (Pnma),
+Clerestory loft (Amm2).
+
+**Cubic** — Cubic crypt (Pm-3m), Cubic cage (Pm-3), Octet truss (Fm-3m), Diamond
+frame (Fd-3m), Gyroid cage (Ia-3d), Chiral knot (P4₁32), Space frame (Im-3m).
+
+A few are there to make a point rather than a building. The two spiral stairs
+are the same authored quarter-turn flight in P4₁ and P4₃; the only difference is
+the hand of the screw, and the stairs wind opposite ways. Basilica and Arcade
+are the same group in differently proportioned cells and are not remotely the
+same building. Chiral bays, Pinwheel court, Terraced steps and Chiral knot have
+no mirrors at all and cannot be laid over their own reflections.
+
+**How much to author.** The rule of thumb is authored volume times group order,
+less whatever lands on a special position. Pmm2 with four operations wants a
+whole quadrant drawn; Fm-3m with a hundred and ninety-two wants one strut.
+Author a quadrant in Fm-3m and the cell comes out solid. Every preset is checked
+to land between 5% and 60% fill, which is the band where a build reads as a
+building rather than as a block or a haze. The spread that comes out:
+
+| | fill |
+|---|---|
+| lightest — Diamond frame, Chiral knot, Basilica | 10–13% |
+| typical — halls, arcades, courts, cloisters | 15–40% |
+| heaviest — Clerestory loft, Terraced steps, Transept | 45–52% |
 
 ## Phase two — interiors
 

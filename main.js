@@ -9,13 +9,13 @@ import { expandUnit, buildSkeleton } from './engine/expander.js';
 import { findVoids, describeVoids } from './engine/voids.js';
 import { buildExport, download } from './engine/export.js';
 import { fillInteriors, describeInteriors } from './engine/wfc/index.js';
-import { PRESETS, buildPreset } from './engine/presets.js';
+import { PRESETS, buildPreset, presetsBySystem } from './engine/presets.js';
 import { Renderer, boxLines, gridLines, linesToMesh } from './engine/renderer.js';
 import {
   VoxelGrid, Palette, MATERIALS, meshGrid, raycastGrid, raycastPlane, rayFromNDC,
 } from './engine/blockcore/index.js';
 
-export const HYPOSTYLE_VERSION = '0.2.1';
+export const HYPOSTYLE_VERSION = '0.3.0';
 
 const $ = (id) => document.getElementById(id);
 const palette = new Palette();
@@ -94,13 +94,21 @@ function buildSwatches() {
 }
 
 function buildPresetList() {
+  // Thirty-odd examples is too many for a flat list, so they are grouped the
+  // way the group select is: by crystal system, with the space group shown
+  // beside the name, because the group is the interesting half of the example.
   const sel = $('presetSelect');
   sel.innerHTML = '';
-  for (const p of PRESETS) {
-    const opt = document.createElement('option');
-    opt.value = p.id;
-    opt.textContent = p.name;
-    sel.appendChild(opt);
+  for (const [system, list] of presetsBySystem()) {
+    const group = document.createElement('optgroup');
+    group.label = SYSTEM_NAMES[system] || system;
+    for (const p of list) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} - ${groupByNumber(p.group).hm}`;
+      group.appendChild(opt);
+    }
+    sel.appendChild(group);
   }
 }
 
@@ -591,6 +599,11 @@ function wireControls() {
   });
 
   $('exportUnitJson').addEventListener('click', () => $('saveUnit').click());
+  $('randomPreset').addEventListener('click', () => {
+    const pick = PRESETS[Math.floor(Math.random() * PRESETS.length)];
+    $('presetSelect').value = pick.id;
+    $('loadPreset').click();
+  });
 
   $('openUnit').addEventListener('click', () => $('fileInput').click());
 

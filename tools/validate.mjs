@@ -30,7 +30,7 @@ import {
   contentKey, faceProfile, opposite, forbiddenMask, boundaryAllows,
   idx as wfcIdx,
 } from '../engine/wfc/index.js';
-import { PRESETS, buildPreset } from '../engine/presets.js';
+import { PRESETS, buildPreset, presetsBySystem } from '../engine/presets.js';
 import {
   VoxelGrid, BudgetExceeded, packKey, unpackKey, Palette, meshGrid, countExposedFaces,
   writeNBT, readNBT, nbt, buildMcStructure, readMcStructure, splitGrid, placementGuide,
@@ -579,6 +579,28 @@ gate('10  room finding');
 
 gate('11  presets');
 {
+  check('at least 30 worked examples', PRESETS.length >= 30, `${PRESETS.length}`);
+  check('preset ids are unique', new Set(PRESETS.map((p) => p.id)).size === PRESETS.length);
+  check('every preset carries a note',
+    PRESETS.every((p) => typeof p.note === 'string' && p.note.length > 40));
+  check('all three crystal systems are represented',
+    new Set(PRESETS.map((p) => groupByNumber(p.group).system)).size === 3,
+    [...new Set(PRESETS.map((p) => groupByNumber(p.group).system))].join(','));
+  check('the examples span a wide range of orders',
+    (() => {
+      const orders = PRESETS.map((p) => groupByNumber(p.group).order);
+      return Math.min(...orders) <= 4 && Math.max(...orders) >= 96;
+    })(),
+    [...new Set(PRESETS.map((p) => groupByNumber(p.group).order))].sort((a, b) => a - b).join(','));
+  check('both hands of the enantiomorphic screw pair are shown',
+    PRESETS.some((p) => groupByNumber(p.group).hm === 'P4_1')
+    && PRESETS.some((p) => groupByNumber(p.group).hm === 'P4_3'));
+  check('at least 20 distinct space groups are used',
+    new Set(PRESETS.map((p) => p.group)).size >= 20,
+    `${new Set(PRESETS.map((p) => p.group)).size}`);
+  check('presetsBySystem covers every preset',
+    [...presetsBySystem().values()].reduce((n, l) => n + l.length, 0) === PRESETS.length);
+
   for (const preset of PRESETS) {
     const { unit } = buildPreset(preset.id);
     const skeleton = buildSkeleton(unit, [2, 2, 1], { budget: 4000000 });

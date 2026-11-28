@@ -315,3 +315,7 @@ against an empty cell still turns the room into a thicket.
 `f` frame · `[` `]` move the work plane · `g` toggle the grid ·
 drag orbits · middle-drag or shift-drag pans · wheel zooms · `Esc` cancels a
 box.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
